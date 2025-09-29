@@ -118,7 +118,7 @@ https://www.nologo.tech/en/product/keyboard/keyboard_controll/super52840/super52
 ![電源周り](https://github.com/user-attachments/assets/db9a7807-b922-4ea8-b83c-386c0c367974)
 
 
-・チップのデーターシートを見ると、VDDが0VでVDDHにのみ電源を供給した場合は自動的に高電圧モードとなり、チップ内のLDO(DCDCも選択可能)が使われることがわかりました。この場合、高電圧モードではVDDは出力となり、チップ内LDOやDCDCで作られた電圧を外部に供給する端子となります。XIAOはVDDとVDDHが直結されているので標準電圧モードにしかなることはできません。  
+・チップのデーターシートを見ると、VDDが0VでVDDHにのみ電源を供給した場合は自動的に高電圧モードとなり、チップ内のLDO(DCDCも選択可能)が使われることがわかりました。高電圧モードではVDDは出力となり、チップ内LDOやDCDCで作られた電圧を外部に供給する端子となります。XIAOはVDDとVDDHが直結されているので標準電圧モードにしかなることはできません。  
   
 ![パワーマネジメント](https://github.com/user-attachments/assets/a36640c5-99a9-4260-854d-ade3e10b9ec8)
 
