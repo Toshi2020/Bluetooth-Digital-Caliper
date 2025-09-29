@@ -12,7 +12,8 @@ https://www.techno-edge.net/article/2023/05/16/1295.html
 B:100mmの物は、通常が0Vで330ms間隔で1.5Vのパルス列が出る、こちらで紹介されているタイプ  
 https://woodgears.ca/tech/caliper/index.html  
   
-![ノギス波形](https://github.com/user-attachments/assets/fe4ffed5-4e33-498e-bd03-333109ddf8c3)
+![ノギス波形](https://github.com/user-attachments/assets/3e32fae5-b010-4072-87e9-60b58b67346b)
+
 
 ・今回はAタイプのパルスに対応した物になります。Bタイプはパルス間隔が狭いので、今回の回路では対応できません。  
 ・(100mmの物は小型で気に入ったので電源スイッチを追加して持ち歩き用とすることにしました。余談ですが中華製のノギスはオフにしてもLCDが消えるだけで消費電流はほとんど変わらないという事に気付くまでに過去に何個電池を無駄にしたことか、、、)  
@@ -106,17 +107,21 @@ https://www.nologo.tech/en/product/keyboard/keyboard_controll/super52840/super52
   
 ・原因の一つがオンボードLDOのRS3236の無負荷電流が大きいことだと思われます。RS3236のデーターシートにはGNDピン電流が50μAとありますがOUT側に流れる無負荷時の電流の記載がありません。このトータルがXIAOのオンボードLDOよりも2桁大きいようです。  
   
-![Super52840](https://github.com/user-attachments/assets/37402821-118f-4006-a27b-50192cb8589e)
+![Super52840](https://github.com/user-attachments/assets/2325ee8b-6892-4a55-ae2e-532efffc0c30)
+
 
 ・LDO RS3236は004ピンの隣にある1mm角の4ピンのチップです。ヒートガンでピンポイントで加熱して針で突いて外したところ電流は170μAまで下がりました。  
 ・次に怪しいのはオンボードのフラッシュメモリです。JEDEC IDを調べるとW25Q16JV_IQのようです。色々トライしても下がらないのでフラッシュも外そうと気持ちが傾いたのですが、ふと気づいてsetup()でフラッシュのSCKとCSをプルアップしてみたところ、システムオフで1.9μA、delay()ループで4.9μAまで下がりました。オンボードLDOがない分だけXIAOより0.3μA低い値となってます。入力端子がフロートだと中途半端に電流が流れるようです。ということは本家XIAOでもプルアップしておいた方が良さそうです。  
 ・オンボードLDOを外してしまったので、チップのVDDへ供給する電圧は3V3端子に接続した電池を使っていたのですが、それを忘れてUSBだけで接続してもチップ自体は動作していることに気付きました。3Vを供給していないのでオンボードLEDは点灯できないのですが。この時3V3端子には1.8Vが出ていました。  
 ・改めて回路図を見ると、この互換ボードはXIAOとは異なりUSB電圧やB+端子のバッテリー電圧がチップのVDDH端子に接続されていることがわかりました。  
   
-![電源周り](https://github.com/user-attachments/assets/651cfefb-c7a3-424d-8298-a91521bcc470)
+![電源周り](https://github.com/user-attachments/assets/db9a7807-b922-4ea8-b83c-386c0c367974)
+
 
 ・チップのデーターシートを見ると、VDDが0VでVDDHにのみ電源を供給した場合は自動的に高電圧モードとなり、チップ内のLDO(DCDCも選択可能)が使われることがわかりました。この場合、高電圧モードではVDDは出力となり、チップ内LDOやDCDCで作られた電圧を外部に供給する端子となります。XIAOはVDDとVDDHが直結されているので標準電圧モードにしかなることはできません。  
-![パワーマネジメント](https://github.com/user-attachments/assets/cb4e6297-15fb-4a96-ab2c-47c86ca0dbf8)
+  
+![パワーマネジメント](https://github.com/user-attachments/assets/a36640c5-99a9-4260-854d-ade3e10b9ec8)
+
 
 ・LDOを除去した互換ボードでUSB未接続でVDDに電池をつないだ時は、VDDHがオープンなのでデーターシートの図からは外れますが、標準電圧モードで動作しました。この時VDDH端子にはVDD-0.2Vの電圧が観測されました。という事はVDDからVDDHには寄生ダイオード的な物が存在するという事かと思います。  
 ・そのような使い方をしていいのか調べたところ、次のような書き込みがありました。  
