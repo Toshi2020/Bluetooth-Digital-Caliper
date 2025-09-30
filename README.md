@@ -21,7 +21,7 @@ https://woodgears.ca/tech/caliper/index.html
 **●動作状況の動画はこちら。**  
 https://youtu.be/n0HdAyAx71c
   
-**●概要などはこちら↓のブログに記述しました。**  
+**●概要などはこちらのブログに記述しました。**  
 https://minkara.carview.co.jp/userid/3336538/blog/48686529/
 
 **●回路**  
