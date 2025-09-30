@@ -22,7 +22,7 @@ https://woodgears.ca/tech/caliper/index.html
 https://youtu.be/n0HdAyAx71c
   
 **●概要などはこちら↓のブログに記述しました。**  
-https://minkara.carview.co.jp/userid/3336538/blog/
+https://minkara.carview.co.jp/userid/3336538/blog/48686529/
 
 **●回路**  
  ![CaliperBLE回路](https://github.com/user-attachments/assets/97540937-5580-443c-825c-2c1f47e3df62)
