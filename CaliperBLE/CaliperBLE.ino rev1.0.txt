@@ -14,32 +14,36 @@
 *		Add python.exe to PATHにチェックを入れてインストール
 *
 *	rev1.0	2025/09/29 initial revision by Toshi
-*	rev2.0	2025/10/03 PPIを利用して取りこぼし防止。digital読み取りは削除
 *
 *****************************************************************************/
 #include <bluefruit.h>
 #include <Adafruit_SPIFlash.h>
 #include <nrf.h>
 #include <nrf_lpcomp.h>
-#include <nrf_saadc.h>
-#include <nrf_ppi.h>
 
 #define DEBUG 0
+#define INVERT_LOGIC 0	// ノギス信号論理反転(NPNTrによるレベル変換)なら1
+#define USE_LPCOMP 1	// ノギスクロック検出にLPCOMPを使うなら
 
 // ピン設定
 #define DATA_PIN A0		// ノギスデータ入力ピン
 #define CLOCK_PIN A1	// ノギスクロック入力ピン(analogRead用)
-// ノギスデータ入力ピン(SAADC用)
-#define DATA_PIN_SAADC SAADC_CH_PSELP_PSELP_AnalogInput0
-// ノギスクロック入力ピン(LPCOMP用)
-#define CLOCK_PIN_LPCOMP LPCOMP_PSEL_PSEL_AnalogInput1
-
 #define SW_PIN D2		// スイッチ入力ピン
 
 #define LED_ON digitalWrite(LED_GREEN, LOW);
 #define LED_OFF digitalWrite(LED_GREEN, HIGH);
 
-#define CLOCK_SPACE (analogRead(CLOCK_PIN) >= 256)
+#if INVERT_LOGIC	// NPN Trによるレベル変換なら
+ #define CLOCK_SPACE (digitalRead(CLOCK_PIN) == LOW)
+ #define DATA_SPACE (digitalRead(DATA_PIN) == LOW)
+#else
+ #if USE_LPCOMP	// クロック検出にLPCOMPを使うなら
+  #define CLOCK_SPACE (get_lpcomp(false))
+ #else
+  #define CLOCK_SPACE (analogRead(CLOCK_PIN) >= 256)
+ #endif //USE_LPCOMP
+ #define DATA_SPACE (analogRead(DATA_PIN) >= 256)
+#endif //INVERT_LOGIC
 
 #define DEBOUNCE_MS 30	// チャタリング除去時間[ms]
 #define LONGPUSH_MS 300	// SW長押し判定時間[ms]
@@ -59,9 +63,7 @@ BLEDis bledis;
 BLEHidAdafruit blehid;
 BLEBas blebas;
 bool fRestart;	// オートパワーオフからの復帰フラグ
-
-#define SAMPLE_COUNT 24	// ノギスから読み取るビット数
-static nrf_saadc_value_t saadc_buffer[SAMPLE_COUNT];	// ADCデータ
+uint32_t RxErr;	// ノギス読み取りエラーコード
 
 // 外部QSPI Flash Memory（省電力化のために使用）
 Adafruit_FlashTransport_QSPI flashTransport;
@@ -69,6 +71,7 @@ Adafruit_SPIFlash flash(&flashTransport);
 
 // プロトタイプ宣言
 void connectCallback(uint16_t conn_handle);
+bool get_lpcomp(bool finit);
 uint32_t ReadCaliper();
 void Transmit(uint32_t rxbit, bool flongpush);
 uint16_t ReadVDD();
@@ -96,10 +99,6 @@ void setup()
 	// オンボードFlashのピン電位を固定(フロートだと電流が増えるボードあり)
 	pinMode(PIN_QSPI_SCK, INPUT_PULLUP);
 	pinMode(PIN_QSPI_CS, INPUT_PULLUP);
-
-	// 念のためNFCピンもプルアップに設定
-	pinMode(PIN_NFC1, INPUT_PULLUP);	// P0.09
-	pinMode(PIN_NFC2, INPUT_PULLUP);	// P0.10
 
 	// チップ内2段目の3.3V→1.3VをLDOからDCDCに変更して効率UP
 	NRF_POWER->DCDCEN  = 1;
@@ -130,14 +129,18 @@ void setup()
 	Serial1.begin(115200);
 	#endif //DEBUG
 
+	// DWT(Data Watchpoint and Trace)初期化(自前のmicrosのため)
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
 	// BLE開始
 	setup_ble();
 
+	#if USE_LPCOMP	// クロック検出にLPCOMPを使うなら
 	// LPCOMP初期化
 	setup_lpcomp();
-
-	// PPI初期化
-	setup_ppi();
+	#endif //USE_LPCOMP
 }
 /*----------------------------------------------------------------------------
 	メインループ
@@ -187,7 +190,9 @@ void loop()
 	noptime += DEBOUNCE_MS;		// 操作なし時間を加算
 	if (noptime >= SYSOFFTIME || nobletime >= SYSOFFTIME2)// 設定値を超えた？
 	{
+		#if USE_LPCOMP	// クロック検出にLPCOMPを使うなら
 		end_lpcomp();	// LPCOMP 停止
+		#endif //USE_LPCOMP
 
 		// 念のためアドバタイズ停止
 		Bluefruit.Advertising.stop();
@@ -198,6 +203,13 @@ void loop()
 		GotoSystemOff();		// オートパワーオフ
 	}
 	delay(DEBOUNCE_MS);	// デバウンス除去のための待ち時間を兼ねてスリープ
+}
+/*----------------------------------------------------------------------------
+	自前のmicros()
+----------------------------------------------------------------------------*/
+inline uint32_t micros_hw()
+{
+	return DWT->CYCCNT / (SystemCoreClock / 1000000); // μs 単位
 }
 /*----------------------------------------------------------------------------
 	BLEセットアップ
@@ -250,37 +262,18 @@ void connectCallback(uint16_t conn_handle)
 	NotifyBattery(ReadVDD());		// バッテリー状態を通知
 	Bluefruit.Advertising.stop();	// 念のためアドバタイズ停止
 }
-/*----------------------------------------------------------------------------
-	SAADC開始
-----------------------------------------------------------------------------*/
-void start_saadc(void)
-{
-	NRF_SAADC->CH[0].PSELP = DATA_PIN_SAADC; // DATA
-	NRF_SAADC->RESULT.PTR = (uint32_t)saadc_buffer;
-	NRF_SAADC->RESULT.MAXCNT = SAMPLE_COUNT;
-	NRF_SAADC->ENABLE = 1;
-	NRF_SAADC->EVENTS_END = 0;
-	NRF_SAADC->TASKS_START = 1;
-}
-/*----------------------------------------------------------------------------
-	SAADC終了
-----------------------------------------------------------------------------*/
-void end_saadc(void)
-{
-	NRF_SAADC->ENABLE = 0;
-	NRF_SAADC->TASKS_START = 0;
-}
+#if USE_LPCOMP	// クロック検出にLPCOMPを使うなら
 /*----------------------------------------------------------------------------
 	LPCOMP初期化
 ----------------------------------------------------------------------------*/
 void setup_lpcomp()
 {
 	// ノギスクロックピン
-	NRF_LPCOMP->PSEL = CLOCK_PIN_LPCOMP;
+	NRF_LPCOMP->PSEL = CLOCK_PIN;
 	// vrefはVDD * 2/8とする
 	NRF_LPCOMP->REFSEL = LPCOMP_REFSEL_REFSEL_Ref2_8Vdd;
 	// 検出は両方
-	NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Up;
+	NRF_LPCOMP->ANADETECT = LPCOMP_ANADETECT_ANADETECT_Cross;
 	// イネイブル
 	NRF_LPCOMP->ENABLE = 1;
 	// スタート
@@ -297,29 +290,32 @@ void end_lpcomp()
 	NRF_LPCOMP->EVENTS_UP = NRF_LPCOMP->EVENTS_DOWN = 0;
 }
 /*----------------------------------------------------------------------------
-	PPI初期化 LPCOMP EVENTS_UP → SAADC SAMPLE TASK
+	LPCOMPデータ取得
 ----------------------------------------------------------------------------*/
-void setup_ppi()
+bool get_lpcomp(bool finit)
 {
-	NRF_PPI->CH[0].EEP =
-		(uint32_t)nrf_lpcomp_event_address_get(
-					NRF_LPCOMP, NRF_LPCOMP_EVENT_UP);
+	static bool bit = true;
 
-	NRF_PPI->CH[0].TEP =
-		(uint32_t) nrf_saadc_task_address_get(
-					NRF_SAADC, NRF_SAADC_TASK_SAMPLE);
+	if (finit)	// 初期化要求か？
+	{
+		// イベント結果クリア
+		NRF_LPCOMP->EVENTS_UP = NRF_LPCOMP->EVENTS_DOWN = 0;
+		bit = true;	// パルスが来ないときにHigh
+	}
+	yield();	// TASK側に一瞬制御を渡す(重要！)
+	if (NRF_LPCOMP->EVENTS_UP)		// 立ち上がりがあった？
+	{
+		NRF_LPCOMP->EVENTS_UP = 0;	// イベント結果クリア
+		bit = true;					// ラインはHigh
+	}
+	if (NRF_LPCOMP->EVENTS_DOWN)	// 立下りがあった？
+	{
+		NRF_LPCOMP->EVENTS_DOWN = 0;// イベント結果クリア
+		bit = false;				// ラインはLow
+	}
+	return bit;
 }
-/*----------------------------------------------------------------------------
-	PPI開始/終了
-----------------------------------------------------------------------------*/
-void start_ppi()
-{
-	NRF_PPI->CHENSET = 1;	// PPI開始
-}
-void end_ppi()
-{
-	NRF_PPI->CHENCLR = 1;	// PPI終了
-}
+#endif //USE_LPCOMP
 /*----------------------------------------------------------------------------
 	ノギスのシリアルデータを読む
 ----------------------------------------------------------------------------*/
@@ -327,7 +323,15 @@ uint32_t ReadCaliper()
 {
 	uint32_t t0;
 	uint32_t rxbit = 0;
-	bool fstart = false;	// 読み取り開始かどうか
+
+	#if INVERT_LOGIC	// NPN Trによるレベル変換ならプルアップ
+	pinMode(DATA_PIN, INPUT_PULLUP);
+	pinMode(CLOCK_PIN, INPUT_PULLUP);
+	#endif //INVERT_LOGIC
+
+	#if USE_LPCOMP	// クロック検出にLPCOMPを使うなら
+	get_lpcomp(true);	// LPCOMPイベント結果初期化
+	#endif //USE_LPCOMP
 
 	while (1)	// 読み取れるまでリトライ
 	{
@@ -336,36 +340,77 @@ uint32_t ReadCaliper()
 		while (CLOCK_SPACE);		// クロックがHの期間期間待つ
 		if (millis() - t0 >= 10)	// Lになるまでに10ms以上かかった？
 		{
-			start_saadc();		// SAADC開始
-			start_ppi();		// PPI開始
-			fstart = true;
-		}
-		if (fstart)
-		{
-			t0 = millis();
-			while (NRF_SAADC->EVENTS_END == 0);	// 24bit分受信するまで待つ
-			NRF_SAADC->EVENTS_END = 0;	// イベントフラグクリア
-			end_ppi();		// PPI終了
-			end_saadc();	// SADC終了
-
-			// この時点で24サンプルがsaadc_buffer[]に入っている
-			for (int16_t i = SAMPLE_COUNT - 1; i >= 0; i--)
+			if (ReadCaliperCore(&rxbit))	// エラーなく読み取れたら
 			{
-				rxbit <<= 1;
-				if (saadc_buffer[i] >= 256)
-				{
-					rxbit |= 1;
-				}
-			}
-			// F/Sで時間を見る。時間内に終わっていたらリターン
-			// 通常24bitパルス列はトータル9ms, 110msインターバル
-			if (millis() - t0 <= 50)
-			{
-				fstart = false;
+				#if INVERT_LOGIC	// プルアップ戻す
+				pinMode(DATA_PIN, INPUT);
+				pinMode(CLOCK_PIN, INPUT);
+				#endif //INVERT_LOGIC
 				return rxbit;
+			}
+			else
+			{
+				Println(RxErr);
 			}
 		}
 	}
+}
+/*----------------------------------------------------------------------------
+	ノギスのシリアルデータを読むコア処理(エラー判定付き)
+----------------------------------------------------------------------------*/
+bool ReadCaliperCore(uint32_t* value)
+{
+	uint32_t t0;
+	uint32_t rxbit = 0;
+	uint32_t nowtime, lasttime, errtime;
+
+	t0 = millis();
+	for (int8_t i = 0; i < 24; i++)
+	{
+		lasttime = micros_hw();
+		while (!CLOCK_SPACE)	// クロックの立ち上がりを待つ
+		{
+			nowtime = micros_hw();
+			if (nowtime - lasttime > 250)	// 通常Lの時間は220μs
+			{
+				RxErr = 1;
+				return false;
+			}
+		}
+		lasttime = micros_hw();
+		if (DATA_SPACE)			// クロック立ち上がり時のデータ
+		{
+			rxbit |= (1L << i);	// ビット取得
+		}
+		nowtime = micros_hw();
+		// 通常のADC処理は24μs。クロックがHの期間で読み取れればOK
+		if (nowtime - lasttime > 80)
+		{
+			RxErr = 2;
+			return false;
+		}
+		if (i < 23)	// 最終ビットでなければ
+		{
+			errtime = (i % 4) == 3 ? 430 : 120;	// 通常Hの時間は393/88μs
+			lasttime = micros_hw();
+			while (CLOCK_SPACE)	// クロックの立下りを待つ
+			{
+				nowtime = micros_hw();
+				if (nowtime - lasttime > errtime)
+				{
+					RxErr = 3;
+					return false;
+				}
+			}
+		}
+	}
+	if (millis() - t0 > 13)	// 通常24bitパルス列はトータル9ms
+	{
+		RxErr = 4;
+		return false;
+	}
+	*value = (int32_t)(rxbit & 0xFFFFFF);
+	return true;
 }
 /*----------------------------------------------------------------------------
 	ノギスからのデータを送信
